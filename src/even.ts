@@ -5,12 +5,14 @@
 
 import {
   CreateStartUpPageContainer,
+  RebuildPageContainer,
   EventSourceType,
   OsEventTypeList,
   TextContainerProperty,
   TextContainerUpgrade,
   waitForEvenAppBridge,
 } from '@evenrealities/even_hub_sdk'
+import { devLog } from './dev-log'
 
 // Audio frame from the SDK's mic capture. Per the SDK README, audio comes
 // as PCM bytes — assumed 16kHz mono 16-bit little-endian (industry-standard
@@ -35,7 +37,9 @@ export interface EvenRuntime {
   onForeground: (handler: () => void) => void
   // Mic capture. Calling startMic emits PCM frames to the registered handler
   // until stopMic. Caller is responsible for routing frames to STT.
-  startMic: (handler: (frame: AudioFrame) => void) => Promise<boolean>
+  // `role` is the Even app's per-frame guess at who is talking ('self' |
+  // 'other' | 'unknown'); undefined on hosts that predate SDK 0.0.14.
+  startMic: (handler: (frame: AudioFrame, role?: string) => void) => Promise<boolean>
   stopMic: () => Promise<void>
   exitApp: () => Promise<void>
   getStorage: (key: string) => Promise<string>
@@ -59,11 +63,42 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   })
 }
 
+// Probe, not a feature yet: SDK 0.0.14+ tags each PCM frame with the Even
+// app's guess at who is talking (self / other / unknown) plus a raw direction
+// value. Before building speaker separation on it we need to see what real
+// glasses report, so tally the tags and send one summary per ~2.5s of audio
+// (the transcription chunk size) to the dev log.
+const ROLE_PROBE_FRAMES = 50
+let roleTally: Record<string, number> = {}
+let roleFrames = 0
+let dirMin: number | null = null
+let dirMax: number | null = null
+function probeSpeakerRole(role: string | undefined, direction: number | null | undefined): void {
+  const key = role ?? 'missing'
+  roleTally[key] = (roleTally[key] ?? 0) + 1
+  if (typeof direction === 'number') {
+    dirMin = dirMin === null ? direction : Math.min(dirMin, direction)
+    dirMax = dirMax === null ? direction : Math.max(dirMax, direction)
+  }
+  roleFrames += 1
+  if (roleFrames < ROLE_PROBE_FRAMES) return
+  devLog('audio-role', { ...roleTally, dirMin, dirMax })
+  roleTally = {}
+  roleFrames = 0
+  dirMin = null
+  dirMax = null
+}
+
+// Why the last connectEvenRuntime() returned null. Shown on the phone so a
+// failed glasses hookup isn't indistinguishable from a desktop browser preview.
+export let connectFailure = ''
+
 export async function connectEvenRuntime(initial: string): Promise<EvenRuntime | null> {
   let bridge: Awaited<ReturnType<typeof waitForEvenAppBridge>>
   try {
     bridge = await withTimeout(waitForEvenAppBridge(), BRIDGE_TIMEOUT_MS)
   } catch {
+    connectFailure = `no Even bridge after ${BRIDGE_TIMEOUT_MS}ms`
     return null
   }
 
@@ -84,7 +119,18 @@ export async function connectEvenRuntime(initial: string): Promise<EvenRuntime |
   const created = await bridge.createStartUpPageContainer(
     new CreateStartUpPageContainer({ containerTotalNum: 1, textObject: [main] }),
   )
-  if (created !== 0) return null
+  if (created !== 0) {
+    // The SDK allows createStartUpPageContainer once per glasses UI session.
+    // A page reload (QR re-scan, Vite HMR) lands here with the startup page
+    // already created, so take over the existing page instead of giving up.
+    const rebuilt = await bridge.rebuildPageContainer(
+      new RebuildPageContainer({ containerTotalNum: 1, textObject: [main] }),
+    )
+    if (!rebuilt) {
+      connectFailure = `glasses page create failed (code ${created}), rebuild failed`
+      return null
+    }
+  }
 
   let lastSent = initial
   let lastLen = initial.length
@@ -100,7 +146,7 @@ export async function connectEvenRuntime(initial: string): Promise<EvenRuntime |
   let swipeHandler: ((dir: SwipeDir, source: InputSource) => void) | null = null
   let doubleTapHandler: ((source: InputSource) => void) | null = null
   let foregroundHandler: (() => void) | null = null
-  let audioHandler: ((frame: AudioFrame) => void) | null = null
+  let audioHandler: ((frame: AudioFrame, role?: string) => void) | null = null
   // Latest battery push from onDeviceStatusChanged. Push beats poll for
   // freshness and avoids hitting BLE on every tick.
   let cachedBattery: number | undefined
@@ -131,9 +177,10 @@ export async function connectEvenRuntime(initial: string): Promise<EvenRuntime |
     // SDK 0.0.10 wraps them as `audioEvent.audioPcm: Uint8Array`. We
     // hand the raw bytes to the registered handler; transport layer
     // is responsible for shaping into Deepgram's expected encoding.
-    const audioEvent = (event as { audioEvent?: { audioPcm?: Uint8Array } }).audioEvent
+    const audioEvent = event.audioEvent
     if (audioEvent?.audioPcm && audioHandler) {
-      audioHandler(audioEvent.audioPcm)
+      probeSpeakerRole(audioEvent.speakerRole, audioEvent.direction)
+      audioHandler(audioEvent.audioPcm, audioEvent.speakerRole)
       return
     }
     if (event.textEvent) {

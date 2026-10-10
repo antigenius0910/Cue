@@ -41,12 +41,17 @@ export interface TranscriptEvent {
   // v0.4.0: per-speaker turns within the chunk. Empty array if Deepgram
   // returned no utterances field (older worker, single-speaker chunk, etc).
   utterances: TranscriptUtterance[]
+  // Fraction of this chunk's role-tagged audio frames the Even app
+  // classified as the wearer speaking. null when the host supplied no
+  // role tags (phone mic, older Even app), in which case callers fall back
+  // to Deepgram's per-chunk diarization.
+  selfShare: number | null
 }
 
 export interface CueTransport {
   ready: boolean
   startMicSession: (onTranscript: (e: TranscriptEvent) => void, onError: (msg: string) => void) => Promise<void>
-  sendAudioFrame: (frame: Uint8Array) => void
+  sendAudioFrame: (frame: Uint8Array, role?: string) => void
   endMicSession: () => Promise<void>
   requestSuggestions: (params: {
     mode: string
@@ -265,6 +270,9 @@ function createChunkedTransport(backend: TransportBackend, notReadyMessage: stri
   let chunksFlushed = 0
   let chunksOk = 0
   let lastError = ''
+  // Role tags of the frames currently in `pending`.
+  let selfFrames = 0
+  let otherFrames = 0
 
   // POST one accumulated chunk to the worker. We never block the audio
   // pipeline on a slow request — `inFlight` gates concurrency and any
@@ -281,6 +289,10 @@ function createChunkedTransport(backend: TransportBackend, notReadyMessage: stri
     chunksFlushed += 1
     const chunk = pending
     pending = new Uint8Array(0)
+    const tagged = selfFrames + otherFrames
+    const selfShare = tagged > 0 ? selfFrames / tagged : null
+    selfFrames = 0
+    otherFrames = 0
     const url = backend.transcribeUrl
     const startedAt = Date.now()
     try {
@@ -306,7 +318,7 @@ function createChunkedTransport(backend: TransportBackend, notReadyMessage: stri
         status: 200, ms: Date.now() - startedAt, ok: true, bytes: chunk.byteLength,
       })
       if (result.text && onTranscriptCb) {
-        onTranscriptCb({ type: 'transcript', text: result.text, isFinal: true, utterances: result.utterances })
+        onTranscriptCb({ type: 'transcript', text: result.text, isFinal: true, utterances: result.utterances, selfShare })
       }
     } catch (err) {
       // Backends return errors rather than throwing; this is the last line
@@ -334,11 +346,15 @@ function createChunkedTransport(backend: TransportBackend, notReadyMessage: stri
       onTranscriptCb = onTranscript
       onErrorCb = onError
       pending = new Uint8Array(0)
+      selfFrames = 0
+      otherFrames = 0
       inFlight = false
       active = true
     },
-    sendAudioFrame(frame) {
+    sendAudioFrame(frame, role) {
       if (!active) return
+      if (role === 'self') selfFrames += 1
+      else if (role === 'other') otherFrames += 1
       framesReceived += 1
       bytesReceived += frame.byteLength
       // Accumulate. Each incoming frame is small (~10-40ms typically); we

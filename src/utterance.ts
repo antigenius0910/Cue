@@ -230,3 +230,49 @@ export function batteryHeaderSuffix(level: number | undefined): string {
   const glyph = pct < 20 ? '○' : '■'
   return `${glyph}${pct}%`
 }
+
+// --- glasses line wrapping (mixed CJK / Latin) ---
+
+// In the firmware font a CJK glyph is 20px against ~12px for a Latin letter,
+// so count it as two columns. Everything from the CJK radicals block upward
+// (ideographs, kana, fullwidth punctuation) is treated as wide.
+function isWide(ch: string): boolean {
+  return (ch.codePointAt(0) ?? 0) >= 0x2e80
+}
+
+function columns(text: string): number {
+  let n = 0
+  for (const ch of text) n += isWide(ch) ? 2 : 1
+  return n
+}
+
+/**
+ * Wrap text to `width` display columns, at most `maxLines` lines (the last
+ * one ends in an ellipsis when text is left over). Latin words stay whole;
+ * CJK text has no spaces, so it may break between any two wide characters.
+ */
+export function wrapColumns(text: string, width: number, maxLines: number): string[] {
+  if (width <= 0 || maxLines <= 0) return []
+  // Tokens: one wide character, or a run of non-space narrow characters.
+  const tokens = text.trim().match(/[⺀-￿]|[^\s⺀-￿]+|\s+/g) ?? []
+  const lines: string[] = []
+  let line = ''
+  for (const tok of tokens) {
+    if (/^\s+$/.test(tok)) {
+      if (line) line += ' '
+      continue
+    }
+    if (line && columns(line) + columns(tok) > width) {
+      lines.push(line.trimEnd())
+      line = ''
+    }
+    line += tok
+  }
+  if (line.trim()) lines.push(line.trimEnd())
+  if (lines.length <= maxLines) return lines
+  const kept = lines.slice(0, maxLines)
+  let last = kept[maxLines - 1]!
+  while (last && columns(last) > width - 1) last = [...last].slice(0, -1).join('')
+  kept[maxLines - 1] = `${last}…`
+  return kept
+}

@@ -2,7 +2,7 @@
 //
 // See ~/Documents/Pulse/ROADMAP.md § "Plan: Cue" for the full plan.
 
-import { connectEvenRuntime, type EvenRuntime, type InputSource, type SwipeDir } from './even'
+import { connectEvenRuntime, connectFailure, type EvenRuntime, type InputSource, type SwipeDir } from './even'
 import { DEFAULT_MODE, MODES, type Mode, type ModeId, modeById, nextMode } from './modes'
 import { nextMockExchange, nextMockProactiveTopics, resetMock } from './mock'
 import {
@@ -35,14 +35,18 @@ import {
 } from './storage'
 import { createBestTransport, setTransportLogger, type CueFetchLog, type CueTransport, type TranscriptEvent } from './transport'
 import { keyLooksValid } from './providers'
+import { applyDevSeed } from './dev-seed'
+import { devLog } from './dev-log'
 import {
   appendTurn,
   batteryHeaderSuffix,
   pruneTurns,
   shouldRequestSuggestion,
+  DEFAULT_TRIGGER,
   speakerLabel,
   trimToSentences,
   wrapWords,
+  wrapColumns,
   type ConversationTurn,
 } from './utterance'
 
@@ -141,7 +145,6 @@ let sessionSuggestionCount = 0
 // in utterance.ts (appendTurn / pruneTurns / speakerLabel) — covered
 // by unit tests there.
 const conversation: ConversationTurn[] = []
-const MAX_DISPLAYED_TURNS = 4
 
 // Phone-side fetch debug log. Captures every /transcribe + /suggest
 // call so we can see exactly what URL / status / error is happening
@@ -150,6 +153,7 @@ const FETCH_LOG_CAP = 50
 const fetchLog: CueFetchLog[] = []
 function pushFetchLog(entry: CueFetchLog): void {
   fetchLog.unshift(entry)
+  devLog('fetch', entry)
   if (fetchLog.length > FETCH_LOG_CAP) fetchLog.length = FETCH_LOG_CAP
   renderFetchLog()
 }
@@ -444,6 +448,8 @@ function trunc(s: string, n: number): string {
 // sweet spot — enough room to land a question without dropping context.
 const LINE_WIDTH = 38
 const SUGGESTION_MAX_LINES = 2
+// Lines a single wrapped line of a custom cue may take; also caps the cue.
+const CUSTOM_CUE_MAX_LINES = 4
 
 // Per-mode prefix glyph for suggestions — gives the user a visual cue of
 // which coach they're hearing without re-reading the header. Numbers stay
@@ -502,24 +508,30 @@ function renderGlasses(): string {
     idleLines.push('[2x] cycle mode')
     return idleLines.join('\n')
   }
-  // Live view.
-  const lines: string[] = [header, '']
-  // v0.4.0: render up to MAX_DISPLAYED_TURNS of the rolling conversation
-  // with [A]/[B] speaker labels. Wearer's turns marked "(you)" so the
-  // user knows we're filtering them from the suggestion context.
+  // Live view. Everything must fit the lens without scrolling: the text
+  // container snaps back to the top on every update, so anything below the
+  // fold is unreadable while the transcript is streaming. Suggestions are
+  // what the wearer came for, so they go first; what was heard goes last.
+  const heard: string[] = []
+  // One line of the latest turn, as proof the mic is hearing something.
+  // Wearer's turns are marked "(you)" so the user knows we're filtering
+  // them from the suggestion context.
   pruneTurns(conversation, Date.now())
-  const recent = conversation.slice(-MAX_DISPLAYED_TURNS)
-  if (recent.length > 0) {
-    for (const turn of recent) {
-      const label = speakerLabel(turn.speaker)
-      const youMarker = turn.speaker === wearerSpeakerId ? ' (you)' : ''
-      lines.push(trunc(`[${label}${youMarker}] ${turn.text}`, 76))
-    }
+  const turn = conversation[conversation.length - 1]
+  if (turn) {
+    const youMarker = turn.speaker === wearerSpeakerId ? ' (you)' : ''
+    // Keep the tail: a long turn must show the words just spoken, not
+    // freeze on its opening words.
+    const prefix = rolesAvailable
+      ? `[${turn.speaker === ROLE_ME ? 'me' : 'them'}] `
+      : `[${speakerLabel(turn.speaker)}${youMarker}] `
+    const room = LINE_WIDTH - prefix.length
+    heard.push(prefix + (turn.text.length > room ? `…${turn.text.slice(-(room - 1))}` : turn.text))
   } else if (lastTranscript) {
     // Mock mode + early frames before any conversation turn lands.
-    lines.push(trunc(lastTranscript, 100))
+    heard.push(trunc(lastTranscript, LINE_WIDTH))
   } else {
-    lines.push(proactiveActive ? 'Fresh topics:' : 'Listening…')
+    heard.push(proactiveActive ? 'Fresh topics:' : 'Listening…')
   }
   // Transport failure banner. Deliberately NOT gated on showDebugOverlay:
   // this is the difference between "nobody is talking" and "your key expired",
@@ -528,25 +540,33 @@ function renderGlasses(): string {
     // Plain ASCII on purpose: '⚠' (U+26A0) measures 4px in the firmware font,
     // i.e. it is missing and would draw as a box — the very bug this banner
     // exists to make visible.
-    lines.push(`ERR ${transportAlert}`)
+    heard.push(`ERR ${transportAlert}`)
   }
   // Diagnostic stats — gated on showDebugOverlay. Default OFF; toggle
   // on via phone-side "Show diagnostic overlay on glasses." Same info
   // as before: audio frames flowing, chunk success rate, last error.
   if (showDebugOverlay && isRealMode && transport) {
     const s = transport.stats()
-    lines.push(`audio frames=${s.framesReceived} chunks=${s.chunksFlushed}/${s.chunksOk}ok`)
+    heard.push(`audio frames=${s.framesReceived} chunks=${s.chunksFlushed}/${s.chunksOk}ok`)
     if (s.lastError) {
-      lines.push(`err: ${s.lastError}`)
+      heard.push(`err: ${s.lastError}`)
     }
   }
-  lines.push('')
-  lines.push('—'.repeat(20))
+  const lines: string[] = [header]
   if (suggestions.length > 0) {
     const bullet = MODE_BULLET[currentMode] ?? '·'
     const isCustom = currentMode === 'custom'
-    suggestions.slice(0, 3).forEach((s, i) => {
-      const label = isCustom ? s.trim() : emphasizeFirstWord(s)
+    // A custom prompt owns its layout: draw its lines as written, without
+    // list numbering, so a cue can be "MOVE" on one line and a sentence to
+    // say underneath.
+    const shown = isCustom ? [] : suggestions.slice(0, 3)
+    if (isCustom) {
+      const cueLines = suggestions.join('\n').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+      for (const l of cueLines) lines.push(...wrapColumns(l, LINE_WIDTH, CUSTOM_CUE_MAX_LINES))
+      lines.length = Math.min(lines.length, 1 + CUSTOM_CUE_MAX_LINES + 1)
+    }
+    shown.forEach((s, i) => {
+      const label = emphasizeFirstWord(s)
       const prefix = `${i + 1}.${bullet} `
       const wrapped = wrapWords(label, LINE_WIDTH - prefix.length, SUGGESTION_MAX_LINES)
       wrapped.forEach((ln, j) => {
@@ -556,8 +576,7 @@ function renderGlasses(): string {
   } else {
     lines.push('(suggestions appear here)')
   }
-  lines.push('')
-  lines.push(mode.proactiveSupported ? '[ring 2x] topics  [tap] mic' : '[tap] toggle mic')
+  lines.push('—'.repeat(20), ...heard)
   return lines.join('\n')
 }
 
@@ -566,7 +585,9 @@ async function paint(): Promise<void> {
   const tag = !agreedToPrivacy ? 'gate' : !micOn ? 'idle' : proactiveActive ? 'proactive' : 'live'
   // eslint-disable-next-line no-console
   console.log(`[cue:state] mode=${currentMode} mic=${micOn ? 'on' : 'off'} stage=${tag} suggestions=${suggestions.length}`)
-  await even.render(renderGlasses())
+  const frame = renderGlasses()
+  devLog('glasses', frame)
+  await even.render(frame)
 }
 
 // --- mock-mode driver ---
@@ -693,6 +714,8 @@ async function micTick(): Promise<void> {
 async function startRealSession(): Promise<void> {
   if (!transport || !even) return
   liveTranscript = ''
+  dialogue.length = 0
+  themSpokeSinceCue = false
   lastSuggestionAt = 0
   // Transport now uses chunked HTTP POST instead of WebSocket (the WebView
   // blocks outbound WS handshakes — see transport.ts header comment).
@@ -704,6 +727,7 @@ async function startRealSession(): Promise<void> {
       // next chunk still has a chance — but do NOT let it fail silently.
       // eslint-disable-next-line no-console
       console.warn('[cue] transcribe error:', msg)
+      devLog('error', `transcribe: ${msg}`)
       consecutiveChunkFailures += 1
       if (consecutiveChunkFailures >= CHUNK_FAIL_ALERT_AT) {
         transportAlert = shortTransportAlert(msg)
@@ -719,6 +743,7 @@ async function startRealSession(): Promise<void> {
     lastTranscript = `(real-mode unavailable: ${msg.slice(0, 80)})`
     // eslint-disable-next-line no-console
     console.error('[cue] real-mode startMicSession failed:', msg)
+    devLog('error', `startMicSession: ${msg}`)
     isRealMode = false
     resetMock()
     startMockTimer()
@@ -727,8 +752,8 @@ async function startRealSession(): Promise<void> {
   }
   // Ask the SDK to start the mic. PCM frames flow into transport via
   // sendAudioFrame; transport buffers and POSTs every CHUNK_MS.
-  const ok = await even.startMic(frame => {
-    transport?.sendAudioFrame(frame)
+  const ok = await even.startMic((frame, role) => {
+    transport?.sendAudioFrame(frame, role)
   })
   if (!ok) {
     lastTranscript = '(mic permission denied)'
@@ -758,9 +783,19 @@ function onTranscriptFrame(e: TranscriptEvent): void {
   // [A]/[B] labels and exclude the wearer's own words from the suggestion
   // prompt. Falls back to whole-chunk text when the worker / Deepgram
   // didn't return utterances (older worker or single-speaker chunk).
-  const turns = e.utterances && e.utterances.length > 0
-    ? e.utterances.map(u => ({ speaker: u.speaker, text: u.text }))
-    : (e.text.trim().length > 0 ? [{ speaker: 0, text: e.text.trim() }] : [])
+  //
+  // Fork: when the glasses tag who is talking, trust that over Deepgram.
+  // Deepgram diarizes each 2.5s chunk in isolation, so its speaker ids
+  // restart at 0 every chunk and carry no identity across chunks. The
+  // glasses' tag does, at the cost of labelling a chunk as one speaker.
+  rolesAvailable = e.selfShare !== null
+  const turns = e.selfShare !== null
+    ? (e.text.trim().length > 0
+        ? [{ speaker: e.selfShare >= SELF_SHARE_THRESHOLD ? ROLE_ME : ROLE_THEM, text: e.text.trim() }]
+        : [])
+    : e.utterances && e.utterances.length > 0
+      ? e.utterances.map(u => ({ speaker: u.speaker, text: u.text }))
+      : (e.text.trim().length > 0 ? [{ speaker: 0, text: e.text.trim() }] : [])
 
   // Accumulate into the conversation (same-speaker turns merge so words
   // stream in until the speaker actually changes).
@@ -789,7 +824,26 @@ function onTranscriptFrame(e: TranscriptEvent): void {
   // Build the rolling LLM-context buffer EXCLUDING the wearer's lines
   // (so suggestions are responses TO the other person, not echoes of
   // what the wearer just said).
-  if (e.isFinal) {
+  if (e.isFinal && rolesAvailable) {
+    // Both sides go to the model, labelled, so it can see what the wearer
+    // has already said and stop cueing a move that was just made.
+    for (const t of turns) {
+      appendDialogue(t.speaker === ROLE_ME, t.text)
+      // A cue answers the other person. Only their speech arms a request
+      // and feeds the end-of-utterance timing; the wearer talking must not
+      // trigger a cue about a reply that hasn't come yet.
+      if (t.speaker === ROLE_THEM) {
+        themSpokeSinceCue = true
+        lastChunkText = t.text
+        lastChunkAt = Date.now()
+      }
+    }
+    if (turns.length > 0) {
+      liveTranscript = renderDialogue()
+      lastTranscriptAt = Date.now()
+    }
+    void maybeRequestSuggestions()
+  } else if (e.isFinal) {
     const otherLines = turns
       .filter(t => wearerSpeakerId < 0 || t.speaker !== wearerSpeakerId)
       .map(t => t.text)
@@ -810,8 +864,50 @@ function onTranscriptFrame(e: TranscriptEvent): void {
   void paint()
 }
 
+// The wearer reads cues mid-conversation, at a glance. Upstream's 3s floor
+// replaces the text faster than it can be read, so hold each cue longer.
+const CUE_TRIGGER = { ...DEFAULT_TRIGGER, minDebounceMs: 8_000, maxWaitMs: 20_000 }
+// With role tags, requests only follow the other person's speech, so the
+// cue can't churn while the wearer talks and the floor can come down.
+const ROLE_CUE_TRIGGER = { ...DEFAULT_TRIGGER, minDebounceMs: 5_000 }
+let lastRequestedTranscript = ''
+
+// --- role-labelled dialogue (glasses speaker tags) ---
+
+const ROLE_ME = 0
+const ROLE_THEM = 1
+// Share of a chunk's frames tagged 'self' above which the chunk counts as
+// the wearer talking. Silence is tagged 'other', so the wearer's own chunks
+// sit well below 100%. From one real session: other-speaker chunks peaked
+// at 12% self, wearer chunks bottomed out near 40%.
+const SELF_SHARE_THRESHOLD = 0.3
+let rolesAvailable = false
+let themSpokeSinceCue = false
+const dialogue: Array<{ me: boolean; text: string }> = []
+
+function appendDialogue(me: boolean, text: string): void {
+  const last = dialogue[dialogue.length - 1]
+  if (last && last.me === me) last.text = `${last.text} ${text}`
+  else dialogue.push({ me, text })
+}
+
+// "ME: …" / "THEM: …" lines, oldest dropped first to fit the window. A
+// single over-long line keeps its tail: the latest words matter most.
+function renderDialogue(): string {
+  const line = (d: { me: boolean; text: string }) => `${d.me ? 'ME' : 'THEM'}: ${d.text}`
+  while (dialogue.length > 1 && dialogue.map(line).join('\n').length > TRANSCRIPT_WINDOW_CHARS) {
+    dialogue.shift()
+  }
+  const only = dialogue[0]
+  if (dialogue.length === 1 && only && only.text.length > TRANSCRIPT_WINDOW_CHARS) {
+    only.text = only.text.slice(-TRANSCRIPT_WINDOW_CHARS)
+  }
+  return dialogue.map(line).join('\n')
+}
+
 async function maybeRequestSuggestions(): Promise<void> {
   if (!transport || !isRealMode) return
+  if (rolesAvailable && !themSpokeSinceCue) return
   const fire = shouldRequestSuggestion(
     {
       lastChunkText,
@@ -821,8 +917,14 @@ async function maybeRequestSuggestions(): Promise<void> {
       transcriptLen: liveTranscript.length,
     },
     Date.now(),
+    rolesAvailable ? ROLE_CUE_TRIGGER : CUE_TRIGGER,
   )
   if (!fire) return
+  // Nothing new was heard since the last request, so the answer can only be
+  // a reworded copy of what is already on the lens.
+  if (liveTranscript === lastRequestedTranscript) return
+  lastRequestedTranscript = liveTranscript
+  themSpokeSinceCue = false
   suggestionInFlight = true
   lastSuggestionAt = Date.now()
   sessionSuggestionCount += 1
@@ -834,10 +936,16 @@ async function maybeRequestSuggestions(): Promise<void> {
       customPrompt,
       // v0.4.2: send recent suggestions so worker can dedupe — no LLM
       // re-emitting the same advice 3 times in a row.
-      recentSuggestions: recentSuggestionsRing.slice(),
+      // A custom prompt names a state ("P6: restate first"); repeating it while
+      // the state holds is correct, so don't ask the model to avoid repeats.
+      recentSuggestions: currentMode === 'custom' ? [] : recentSuggestionsRing.slice(),
     })
+    devLog('suggest', { mode: currentMode, ms: Date.now() - lastSuggestionAt, transcript: lastRequestedTranscript, result })
     if (result.ok) {
-      suggestions = result.suggestions
+      // A lone "-" is a custom prompt's way of saying "no change": keep the
+      // current cue on the lens rather than blanking it.
+      const fresh = result.suggestions.filter(s => s.trim() !== '-')
+      if (fresh.length > 0) suggestions = fresh
       // Track the new suggestions for next-call dedupe.
       for (const s of result.suggestions) {
         recentSuggestionsRing.push(s)
@@ -1050,6 +1158,8 @@ async function bootstrap(): Promise<void> {
   if (even) {
     setStorageBridge({ getStorage: even.getStorage, setStorage: even.setStorage })
   }
+  // Must run after the bridge is wired and before hydration reads storage.
+  await applyDevSeed()
 
   // Hydrate state.
   agreedToPrivacy = await hasAgreedToPrivacy()
@@ -1093,12 +1203,14 @@ async function bootstrap(): Promise<void> {
   }
 
   if (!even) {
-    status.textContent = 'Running outside the Even runtime — browser preview only.'
+    status.textContent = `Running outside the Even runtime — browser preview only. (${connectFailure})`
+    devLog('boot', status.textContent)
     return
   }
   status.textContent = agreedToPrivacy
     ? 'Glasses connected. Use them to start a session.'
     : 'Glasses connected. Accept the privacy notice to enable mic.'
+  devLog('boot', status.textContent)
 
   even.onTap(onTap)
   even.onSwipe(onSwipe)
@@ -1116,4 +1228,5 @@ async function bootstrap(): Promise<void> {
 void bootstrap().catch(err => {
   // eslint-disable-next-line no-console
   console.error('[cue] bootstrap threw:', err?.message ?? err, err?.stack)
+  devLog('error', `bootstrap: ${err?.message ?? err}`)
 })

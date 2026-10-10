@@ -14,6 +14,7 @@
 // user's own phone that is the intended model, and it is disclosed in the
 // mic/network permission text.
 
+import { devLog } from './dev-log'
 import { MODES, type ModeId } from './modes'
 
 export type LlmProvider = 'anthropic' | 'openai'
@@ -177,7 +178,10 @@ export async function suggestDirect(
   fetchImpl: FetchLike = fetch,
 ): Promise<SuggestResult> {
   const { provider, apiKey, systemPrompt, transcript, signal } = params
-  const userContent = provider === 'anthropic'
+  // A role-labelled transcript ("ME: …" / "THEM: …") carries both voices, so
+  // it must not be introduced as the other person's alone.
+  const labelled = /^(ME|THEM): /.test(transcript)
+  const userContent = provider === 'anthropic' && !labelled
     ? `Recent conversation transcript (the other person's voice):\n\n"${transcript}"\n\nSuggestions:`
     : `Recent conversation transcript:\n\n"${transcript}"\n\nSuggestions:`
   const req: { url: string; init: RequestInit } = provider === 'anthropic'
@@ -214,6 +218,7 @@ export async function suggestDirect(
     const resp = await fetchImpl(req.url, req.init)
     if (!resp.ok) {
       const txt = await resp.text().catch(() => '')
+      devLog('provider-error', { provider, status: resp.status, body: txt.slice(0, 400) })
       return { ok: false, status: resp.status, error: explainProviderHttp(provider, resp.status, txt) }
     }
     const json = (await resp.json()) as {

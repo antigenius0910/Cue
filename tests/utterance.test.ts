@@ -8,6 +8,7 @@ import {
   shouldRequestSuggestion,
   trimToSentences,
   wrapWords,
+  wrapColumns,
   type UtteranceSignal,
 } from '../src/utterance'
 
@@ -160,5 +161,27 @@ describe('batteryHeaderSuffix', () => {
   it('clamps out-of-range values', () => {
     expect(batteryHeaderSuffix(150)).toBe('■100%')
     expect(batteryHeaderSuffix(-10)).toBe('○0%')
+  })
+})
+
+describe('wrapColumns', () => {
+  it('counts a CJK character as two columns and breaks between them', () => {
+    // 10 wide chars = 20 columns; width 12 fits 6 per line.
+    expect(wrapColumns('複述對方立場承認責任', 12, 3)).toEqual(['複述對方立場', '承認責任'])
+  })
+  it('keeps Latin words whole in mixed text', () => {
+    expect(wrapColumns('先問 what matters most', 12, 3)).toEqual(['先問 what', 'matters most'])
+  })
+  it('ends the last allowed line with an ellipsis when text is left over', () => {
+    const r = wrapColumns('一二三四五六七八九十一二三四五六七八九十', 10, 2)
+    expect(r).toHaveLength(2)
+    expect(r[1]).toMatch(/…$/)
+  })
+  it('never exceeds the column budget against the firmware font', () => {
+    for (const line of wrapColumns('把約定講清楚：誰負責什麼、什麼時候完成？So you handle deadlines and filing', 38, 4)) {
+      let cols = 0
+      for (const ch of line) cols += (ch.codePointAt(0) ?? 0) >= 0x2e80 ? 2 : 1
+      expect(cols).toBeLessThanOrEqual(38)
+    }
   })
 })

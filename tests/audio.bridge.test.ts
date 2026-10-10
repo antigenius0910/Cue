@@ -46,14 +46,14 @@ interface FakeBridge {
   /** Pump one PCM frame to whatever handler main.ts registered via even.startMic. */
   pumpFrame: (frame: Uint8Array) => void
   /** Pump a sequence of N frames each `bytes` long. */
-  pumpFrames: (count: number, bytes: number) => void
+  pumpFrames: (count: number, bytes: number, role?: string) => void
 }
 
 function createFakeBridge(initialBattery: number | undefined = 80): FakeBridge {
   let tapHandler: ((src: string) => void) | null = null
   let doubleTapHandler: ((src: string) => void) | null = null
   let foregroundHandler: (() => void) | null = null
-  let frameHandler: ((frame: Uint8Array) => void) | null = null
+  let frameHandler: ((frame: Uint8Array, role?: string) => void) | null = null
   let lastRendered = ''
   let mic = false
   const battery = initialBattery
@@ -84,12 +84,12 @@ function createFakeBridge(initialBattery: number | undefined = 80): FakeBridge {
     lastRender: () => lastRendered,
     micActive: () => mic,
     pumpFrame: (frame: Uint8Array) => frameHandler?.(frame),
-    pumpFrames: (count: number, bytes: number) => {
+    pumpFrames: (count: number, bytes: number, role?: string) => {
       for (let i = 0; i < count; i++) {
         // Deterministic non-zero bytes so any byte-count assertion is meaningful.
         const f = new Uint8Array(bytes)
         for (let j = 0; j < bytes; j++) f[j] = (i + j) & 0xff
-        frameHandler?.(f)
+        frameHandler?.(f, role)
       }
     },
   }
@@ -225,7 +225,7 @@ describe('Cue audio pipeline (fake bridge + mocked worker)', () => {
     expect(transcribeCalls[0]!.bytes).toBeGreaterThanOrEqual(CHUNK_BYTES)
   })
 
-  it('renders [A]/[B] labels for two-speaker utterances', async () => {
+  it('shows only the latest turn, with its speaker label', async () => {
     installFakeFetch({
       utterancesQueue: [
         [
@@ -245,11 +245,13 @@ describe('Cue audio pipeline (fake bridge + mocked worker)', () => {
     // Wait long enough for fetch + onTranscript + paint to settle.
     await new Promise(r => setTimeout(r, 80))
     const out = fake.lastRender()
-    expect(out).toMatch(/\[A\] how was your day/)
+    // The live view fits the lens without scrolling, so only the most
+    // recent turn is drawn.
     expect(out).toMatch(/\[B\] pretty good/)
+    expect(out).not.toMatch(/how was your day/)
   })
 
-  it('marks the wearer with "(you)" and excludes wearer text from /suggest transcript', async () => {
+  it('excludes wearer text from /suggest transcript', async () => {
     const calls: FakeFetchOpts['calls'] = []
     installFakeFetch({
       calls,
@@ -273,7 +275,6 @@ describe('Cue audio pipeline (fake bridge + mocked worker)', () => {
     await new Promise(r => setTimeout(r, 200))
 
     const out = fake.lastRender()
-    expect(out).toMatch(/\[A \(you\)\] I had a long day/)
     expect(out).toMatch(/\[B\] tell me about the meeting/)
 
     // /suggest payload's transcript field must NOT contain wearer's text.
@@ -283,6 +284,37 @@ describe('Cue audio pipeline (fake bridge + mocked worker)', () => {
     const transcript = (lastSuggest.body as { transcript: string }).transcript
     expect(transcript).not.toMatch(/I had a long day/)
     expect(transcript).toMatch(/tell me about the meeting/)
+  })
+
+  it('labels chunks ME/THEM from the glasses role tags and sends both to /suggest', async () => {
+    const calls: FakeFetchOpts['calls'] = []
+    installFakeFetch({
+      calls,
+      utterancesQueue: [
+        [{ speaker: 0, text: 'You never told me.' }],
+        [{ speaker: 0, text: 'You are right, I did not.' }],
+      ],
+    })
+    await bootMocked({
+      'cue:privacy-agreed:v1': '1',
+      'cue:worker-url:v1': 'https://cue-test.workers.dev',
+      'cue:worker-token:v1': 'test-bearer',
+    })
+    fake.invokeTap('glasses')
+    await new Promise(r => setTimeout(r, 50))
+    // Deepgram calls both chunks speaker 0; only the role tags tell them apart.
+    fake.pumpFrames(10, 10_000, 'other')
+    await new Promise(r => setTimeout(r, 80))
+    fake.pumpFrames(10, 10_000, 'self')
+    await new Promise(r => setTimeout(r, 80))
+    expect(fake.lastRender()).toMatch(/\[me\] You are right/)
+
+    fake.invokeTap('glasses') // mic off
+    await new Promise(r => setTimeout(r, 50))
+    const suggestCalls = calls!.filter(c => c.url.endsWith('/suggest'))
+    expect(suggestCalls.length).toBeGreaterThanOrEqual(1)
+    const first = (suggestCalls[0]!.body as { transcript: string }).transcript
+    expect(first).toMatch(/^THEM: You never told me\./)
   })
 
   it('flushes a trailing partial chunk when mic is toggled off', async () => {
