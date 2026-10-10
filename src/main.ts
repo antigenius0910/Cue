@@ -37,6 +37,7 @@ import { createBestTransport, setTransportLogger, type CueFetchLog, type CueTran
 import { keyLooksValid } from './providers'
 import { applyDevSeed } from './dev-seed'
 import { devLog } from './dev-log'
+import { devRole, devSwipeSpeaker, installDevTalkKey } from './dev-talk-key'
 import {
   appendTurn,
   batteryHeaderSuffix,
@@ -360,6 +361,7 @@ root.innerHTML = `
 `
 
 const status = document.querySelector<HTMLParagraphElement>('#status')!
+installDevTalkKey(status)
 const modeList = document.querySelector<HTMLDivElement>('#mode-list')!
 const customPromptInput = document.querySelector<HTMLTextAreaElement>('#custom-prompt')!
 const saveCustomBtn = document.querySelector<HTMLButtonElement>('#save-custom')!
@@ -753,7 +755,7 @@ async function startRealSession(): Promise<void> {
   // Ask the SDK to start the mic. PCM frames flow into transport via
   // sendAudioFrame; transport buffers and POSTs every CHUNK_MS.
   const ok = await even.startMic((frame, role) => {
-    transport?.sendAudioFrame(frame, role)
+    transport?.sendAudioFrame(frame, devRole(role))
   })
   if (!ok) {
     lastTranscript = '(mic permission denied)'
@@ -1008,7 +1010,8 @@ function onDoubleTap(source: InputSource): void {
   }
 }
 
-function onSwipe(_dir: SwipeDir): void {
+function onSwipe(dir: SwipeDir): void {
+  devSwipeSpeaker(dir)
   // Reserved for v0.2+ — could let the user scroll back through the
   // transcript buffer or page through more suggestions.
 }
