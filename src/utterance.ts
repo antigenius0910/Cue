@@ -276,3 +276,23 @@ export function wrapColumns(text: string, width: number, maxLines: number): stri
   kept[maxLines - 1] = `${last}…`
   return kept
 }
+
+// Chinese transcripts arrive with spaces between words, and chunks are
+// joined with a space. Drop whitespace that sits between two wide
+// characters; keep it around Latin words.
+export function tidyCjk(text: string): string {
+  return text.replace(/(?<=[⺀-￿])\s+(?=[⺀-￿])/g, '')
+}
+
+/** The last part of `text` that fits in `width` display columns, with a
+ *  leading ellipsis when something was cut. */
+export function tailColumns(text: string, width: number): string {
+  if (columns(text) <= width) return text
+  const chars = [...text]
+  let out = ''
+  for (let i = chars.length - 1; i >= 0; i--) {
+    if (columns(chars[i]! + out) > width - 1) break
+    out = chars[i]! + out
+  }
+  return `…${out}`
+}

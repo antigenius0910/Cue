@@ -48,6 +48,8 @@ import {
   trimToSentences,
   wrapWords,
   wrapColumns,
+  tailColumns,
+  tidyCjk,
   type ConversationTurn,
 } from './utterance'
 
@@ -527,8 +529,7 @@ function renderGlasses(): string {
     const prefix = rolesAvailable
       ? `[${turn.speaker === ROLE_ME ? 'me' : 'them'}] `
       : `[${speakerLabel(turn.speaker)}${youMarker}] `
-    const room = LINE_WIDTH - prefix.length
-    heard.push(prefix + (turn.text.length > room ? `…${turn.text.slice(-(room - 1))}` : turn.text))
+    heard.push(prefix + tailColumns(tidyCjk(turn.text), LINE_WIDTH - prefix.length))
   } else if (lastTranscript) {
     // Mock mode + early frames before any conversation turn lands.
     heard.push(trunc(lastTranscript, LINE_WIDTH))
@@ -718,6 +719,12 @@ async function startRealSession(): Promise<void> {
   liveTranscript = ''
   dialogue.length = 0
   themSpokeSinceCue = false
+  // The on-lens transcript line is session state too. Left alone it shows
+  // the previous session's last words until they age out, which reads as
+  // the old conversation still being in play.
+  conversation.length = 0
+  lastTranscript = ''
+  lastRequestedTranscript = ''
   lastSuggestionAt = 0
   // Transport now uses chunked HTTP POST instead of WebSocket (the WebView
   // blocks outbound WS handshakes — see transport.ts header comment).
@@ -793,7 +800,7 @@ function onTranscriptFrame(e: TranscriptEvent): void {
   rolesAvailable = e.selfShare !== null
   const turns = e.selfShare !== null
     ? (e.text.trim().length > 0
-        ? [{ speaker: e.selfShare >= SELF_SHARE_THRESHOLD ? ROLE_ME : ROLE_THEM, text: e.text.trim() }]
+        ? [{ speaker: e.selfShare >= SELF_SHARE_THRESHOLD ? ROLE_ME : ROLE_THEM, text: tidyCjk(e.text.trim()) }]
         : [])
     : e.utterances && e.utterances.length > 0
       ? e.utterances.map(u => ({ speaker: u.speaker, text: u.text }))
@@ -871,7 +878,9 @@ function onTranscriptFrame(e: TranscriptEvent): void {
 const CUE_TRIGGER = { ...DEFAULT_TRIGGER, minDebounceMs: 8_000, maxWaitMs: 20_000 }
 // With role tags, requests only follow the other person's speech, so the
 // cue can't churn while the wearer talks and the floor can come down.
-const ROLE_CUE_TRIGGER = { ...DEFAULT_TRIGGER, minDebounceMs: 5_000 }
+// minTranscriptChars counts the "THEM: " label too; Chinese says a lot in
+// few characters, so the upstream floor of 16 would skip short opening lines.
+const ROLE_CUE_TRIGGER = { ...DEFAULT_TRIGGER, minDebounceMs: 5_000, minTranscriptChars: 10 }
 let lastRequestedTranscript = ''
 
 // --- role-labelled dialogue (glasses speaker tags) ---
@@ -889,7 +898,7 @@ const dialogue: Array<{ me: boolean; text: string }> = []
 
 function appendDialogue(me: boolean, text: string): void {
   const last = dialogue[dialogue.length - 1]
-  if (last && last.me === me) last.text = `${last.text} ${text}`
+  if (last && last.me === me) last.text = tidyCjk(`${last.text} ${text}`)
   else dialogue.push({ me, text })
 }
 

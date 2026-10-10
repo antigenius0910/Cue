@@ -31,9 +31,17 @@ export const ANTHROPIC_ORIGIN = 'https://api.anthropic.com'
 export const OPENAI_ORIGIN = 'https://api.openai.com'
 export const PROVIDER_ORIGINS = [DEEPGRAM_ORIGIN, ANTHROPIC_ORIGIN, OPENAI_ORIGIN] as const
 
+// Speech model and language are build-time settings (see .env). The
+// defaults are upstream's: nova-2, and no language param, which Deepgram
+// treats as English.
+const STT_MODEL = import.meta.env.VITE_STT_MODEL || 'nova-2'
+const STT_LANGUAGE = import.meta.env.VITE_STT_LANGUAGE
+  ? `&language=${encodeURIComponent(import.meta.env.VITE_STT_LANGUAGE)}`
+  : ''
+
 // Same params the Worker sends: diarize + utterances give per-speaker turns.
 export const DEEPGRAM_LISTEN_URL =
-  `${DEEPGRAM_ORIGIN}/v1/listen?model=nova-2&punctuate=true&diarize=true&utterances=true&smart_format=true`
+  `${DEEPGRAM_ORIGIN}/v1/listen?model=${encodeURIComponent(STT_MODEL)}${STT_LANGUAGE}&punctuate=true&diarize=true&utterances=true&smart_format=true`
 export const ANTHROPIC_MESSAGES_URL = `${ANTHROPIC_ORIGIN}/v1/messages`
 export const OPENAI_CHAT_URL = `${OPENAI_ORIGIN}/v1/chat/completions`
 

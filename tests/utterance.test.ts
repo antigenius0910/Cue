@@ -9,6 +9,8 @@ import {
   trimToSentences,
   wrapWords,
   wrapColumns,
+  tailColumns,
+  tidyCjk,
   type UtteranceSignal,
 } from '../src/utterance'
 
@@ -183,5 +185,22 @@ describe('wrapColumns', () => {
       for (const ch of line) cols += (ch.codePointAt(0) ?? 0) >= 0x2e80 ? 2 : 1
       expect(cols).toBeLessThanOrEqual(38)
     }
+  })
+})
+
+describe('tidyCjk', () => {
+  it('removes spaces between Chinese characters but keeps them around Latin words', () => {
+    expect(tidyCjk('你 從來 不 聽 我 說話')).toBe('你從來不聽我說話')
+    expect(tidyCjk('我 用 Slack 通知 你 了')).toBe('我用 Slack 通知你了')
+  })
+})
+
+describe('tailColumns', () => {
+  it('returns short text unchanged', () => {
+    expect(tailColumns('你好', 10)).toBe('你好')
+  })
+  it('keeps the tail within the column budget, counting CJK as two', () => {
+    // 10 wide chars = 20 columns; budget 9 leaves 8 for text after the ellipsis.
+    expect(tailColumns('一二三四五六七八九十', 9)).toBe('…七八九十')
   })
 })

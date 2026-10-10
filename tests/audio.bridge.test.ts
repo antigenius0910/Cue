@@ -317,6 +317,29 @@ describe('Cue audio pipeline (fake bridge + mocked worker)', () => {
     expect(first).toMatch(/^THEM: You never told me\./)
   })
 
+  it('starts a new mic session with no transcript left over from the last one', async () => {
+    const calls: FakeFetchOpts['calls'] = []
+    installFakeFetch({ calls, utterancesQueue: [[{ speaker: 0, text: 'You never told me.' }]] })
+    await bootMocked({
+      'cue:privacy-agreed:v1': '1',
+      'cue:worker-url:v1': 'https://cue-test.workers.dev',
+      'cue:worker-token:v1': 'test-bearer',
+    })
+    fake.invokeTap('glasses')
+    await new Promise(r => setTimeout(r, 50))
+    fake.pumpFrames(10, 10_000, 'other')
+    await new Promise(r => setTimeout(r, 80))
+    expect(fake.lastRender()).toMatch(/told me/)
+
+    fake.invokeTap('glasses') // mic off
+    await new Promise(r => setTimeout(r, 50))
+    fake.invokeTap('glasses') // mic on again
+    await new Promise(r => setTimeout(r, 50))
+    // The line is tail-truncated on the lens, so match a fragment of it.
+    expect(fake.lastRender()).not.toMatch(/told me/)
+    expect(fake.lastRender()).toMatch(/listening/)
+  })
+
   it('flushes a trailing partial chunk when mic is toggled off', async () => {
     const calls: FakeFetchOpts['calls'] = []
     installFakeFetch({

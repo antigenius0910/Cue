@@ -30,36 +30,29 @@ export function devRole(role: string | undefined): string | undefined {
 function setHeld(next: boolean, indicator: HTMLElement | null, via: string): void {
   armed = true
   held = next
+  if (via !== 'swipe') latched = false
   devLog('talk-key', { speaker: held ? 'ME' : 'THEM', via })
   if (!indicator) return
   indicator.textContent = held ? 'now tagging: ME' : 'now tagging: THEM'
   indicator.style.background = held ? '#fef991' : '#eee'
 }
 
-// Holding the simulator's Up control = ME is talking; not pressing = THEM.
-// The glasses touchpad has no "held" state, only discrete swipe events, but
-// a held Up key auto-repeats, so ME lasts for as long as Up events keep
-// arriving and falls back to THEM shortly after they stop. The grace period
-// has to outlast the OS's delay before the first repeat. Down ends ME at
-// once. Unlike the keyboard listeners below, this goes through the
-// simulator's own controls, so it works whichever part of the window has
-// focus.
-const SWIPE_HOLD_GRACE_MS = 1200
-let swipeTimer: number | null = null
+// The simulator's Up / Down controls as a speaker switch: Up = ME is
+// talking, Down = THEM. It latches until the other one is pressed. An
+// earlier version treated a held, auto-repeating Up as ME and fell back to
+// THEM on a timer, but the timer's lag mislabelled the words right after
+// each handover; an explicit press on each side has no lag. Unlike the
+// keyboard listeners below, this goes through the simulator's own controls,
+// so it works whichever part of the window has focus.
+let latched = false
 
 export function devSwipeSpeaker(dir: 'up' | 'down'): void {
   if (import.meta.env.MODE !== 'development') return
-  if (swipeTimer !== null) window.clearTimeout(swipeTimer)
-  swipeTimer = null
-  if (dir === 'down') {
-    if (held || !armed) setHeld(false, indicatorEl, 'swipe')
-    return
-  }
-  if (!held) setHeld(true, indicatorEl, 'swipe')
-  swipeTimer = window.setTimeout(() => {
-    swipeTimer = null
-    setHeld(false, indicatorEl, 'swipe-release')
-  }, SWIPE_HOLD_GRACE_MS)
+  const me = dir === 'up'
+  latched = true
+  // A held key auto-repeats; only a change of speaker is worth acting on.
+  if (armed && held === me) return
+  setHeld(me, indicatorEl, 'swipe')
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -75,7 +68,7 @@ export function installDevTalkKey(mount: HTMLElement): void {
   box.style.cssText = 'margin: 0 0 1rem 0; padding: .5rem .75rem; border: 1px dashed #999; border-radius: 4px; font-size: .9em;'
   const button = document.createElement('button')
   button.type = 'button'
-  button.textContent = 'Hold = ME (or hold Up in the simulator; not pressing = THEM)'
+  button.textContent = 'Hold = ME (or in the simulator: Up = ME, Down = THEM)'
   button.style.cssText = 'padding: .5rem .75rem; cursor: pointer; margin-right: .5rem;'
   const indicator = document.createElement('span')
   indicator.textContent = 'dev speaker key: not used yet — click this page first'
@@ -96,7 +89,7 @@ export function installDevTalkKey(mount: HTMLElement): void {
     if (e.code !== TALK_KEY || isTyping(e.target)) return
     setHeld(false, indicator, 'key')
   })
-  // Losing focus mid-hold would otherwise leave the key stuck on ME. An Up
-  // hold is exempt: its own timer ends it.
-  window.addEventListener('blur', () => { if (held && swipeTimer === null) setHeld(false, indicator, 'blur') })
+  // Losing focus mid-hold would otherwise leave the key stuck on ME. A
+  // latched Up is exempt: the tester clicks other windows all the time.
+  window.addEventListener('blur', () => { if (held && !latched) setHeld(false, indicator, 'blur') })
 }

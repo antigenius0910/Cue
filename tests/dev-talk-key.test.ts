@@ -45,30 +45,18 @@ describe('dev speaker key', () => {
     expect(devRole('unknown')).toBe('unknown')
   })
 
-  it('is ME while Up events keep arriving and THEM shortly after they stop', async () => {
-    vi.useFakeTimers()
-    try {
-      const { devRole, devSwipeSpeaker } = await load('development')
-      devSwipeSpeaker('up')
-      // A held key repeats: each repeat pushes the release further out.
-      for (let i = 0; i < 20; i++) {
-        vi.advanceTimersByTime(100)
-        devSwipeSpeaker('up')
-      }
-      window.dispatchEvent(new Event('blur'))
-      expect(devRole('unknown')).toBe('self')
-      vi.advanceTimersByTime(1100)
-      expect(devRole('unknown')).toBe('self')
-      vi.advanceTimersByTime(200)
-      expect(devRole('unknown')).toBe('other')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('ends ME immediately on Down', async () => {
+  it('latches on Up = ME and Down = THEM, and survives window blur', async () => {
     const { devRole, devSwipeSpeaker } = await load('development')
     devSwipeSpeaker('up')
+    devSwipeSpeaker('up') // key auto-repeat
+    window.dispatchEvent(new Event('blur'))
+    expect(devRole('unknown')).toBe('self')
+    devSwipeSpeaker('down')
+    expect(devRole('unknown')).toBe('other')
+  })
+
+  it('arms on a first Down so THEM can be tagged before ME ever speaks', async () => {
+    const { devRole, devSwipeSpeaker } = await load('development')
     devSwipeSpeaker('down')
     expect(devRole('unknown')).toBe('other')
   })

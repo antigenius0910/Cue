@@ -6,6 +6,9 @@ interface ImportMetaEnv {
   readonly VITE_SEED_DEEPGRAM_KEY?: string
   readonly VITE_SEED_LLM_KEY?: string
   readonly VITE_SEED_LLM_PROVIDER?: string
+  // Deepgram speech model and language, see .env.
+  readonly VITE_STT_MODEL?: string
+  readonly VITE_STT_LANGUAGE?: string
 }
 interface ImportMeta {
   readonly env: ImportMetaEnv
